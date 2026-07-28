@@ -227,22 +227,34 @@ function flush(){
   if(!POST_URL || syncing || !DB.outbox || !DB.outbox.length){ syncStat(); return; }
   syncing=true; syncStat();
   var batch=DB.outbox.slice(0,100);
-  var x=new XMLHttpRequest();
-  x.open("POST", POST_URL, true);
-  x.setRequestHeader("Content-Type","text/plain;charset=utf-8");
-  x.timeout=15000;
-  x.onreadystatechange=function(){
-    if(x.readyState!==4){ return; }
+  var payload=JSON.stringify({ token:TOKEN, events:batch });
+
+  /* Google Apps Script answers through a redirect that carries no CORS headers,
+     so the browser will not let us read the response even when the write worked.
+     We therefore send in no-cors mode and treat "the request left the device"
+     as success. A real network failure still rejects, which is the case that
+     matters -- it keeps the taps queued until the WiFi comes back. */
+  function done(){
     syncing=false;
-    if(x.status>=200 && x.status<400){
-      DB.outbox=DB.outbox.slice(batch.length); save(); syncStat();
-      if(DB.outbox.length){ flush(); }
-    } else { syncStat(); }
-  };
-  x.ontimeout=function(){ syncing=false; syncStat(); };
-  x.onerror=function(){ syncing=false; syncStat(); };
-  try { x.send(JSON.stringify({ token:TOKEN, events:batch })); }
-  catch(e){ syncing=false; syncStat(); }
+    DB.outbox=DB.outbox.slice(batch.length); save(); syncStat();
+    if(DB.outbox.length){ flush(); }
+  }
+  function failed(){ syncing=false; syncStat(); }
+
+  if(window.fetch){
+    fetch(POST_URL, { method:'POST', mode:'no-cors', cache:'no-store',
+                      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+                      body:payload }).then(done, failed);
+  } else {
+    var x=new XMLHttpRequest();
+    x.open("POST", POST_URL, true);
+    x.setRequestHeader("Content-Type","text/plain;charset=utf-8");
+    x.timeout=15000;
+    x.onreadystatechange=function(){ if(x.readyState===4){ done(); } };
+    x.ontimeout=failed;
+    x.onerror=function(){ if(navigator.onLine===false){ failed(); } else { done(); } };
+    try { x.send(payload); } catch(e){ failed(); }
+  }
 }
 
 /* ============ RENDER ============ */
