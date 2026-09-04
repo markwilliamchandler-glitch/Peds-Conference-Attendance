@@ -81,15 +81,26 @@ th{background:#f2f4f7;font-size:11px;text-transform:uppercase;color:#4a5468}
 
 <!-- MENU -->
 <div class="panel" id="pmenu">
-  <h1>Menu</h1>
-  <div class="lbl">Session title</div>
+  <h1>Conference</h1>
+  <div id="nowbox" style="padding:11px;border-radius:10px;margin-bottom:13px"></div>
+
+  <div class="lbl">Conference name</div>
+  <div id="quickpick" style="margin-bottom:6px"></div>
   <input class="fld" id="fttl" type="text" placeholder="Noon Conference">
+
   <div class="lbl">Date</div>
-  <input class="fld" id="fdate" type="date">
-  <div class="lbl">Presenter</div>
-  <input class="fld" id="fpres" type="text" placeholder="optional">
-  <p><span class="btn" id="bnew" style="display:block">Start This Session</span></p>
-  <p style="font-size:12px;color:#4a5468" id="sessnote"></p>
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+    <input class="fld" id="fdate" type="date" style="margin-bottom:0;flex:1">
+    <span class="btn" id="btoday" style="flex:0 0 auto;margin:0">Today</span>
+  </div>
+
+  <div class="lbl">Presenter (optional)</div>
+  <input class="fld" id="fpres" type="text">
+
+  <p><span class="btn" id="bstart" style="display:block;padding:15px;font-size:16px">Start This Conference</span></p>
+  <p><span class="btn g" id="brename" style="display:block">Rename / Fix Date</span></p>
+  <p><span class="btn r" id="bend" style="display:block">End Conference</span></p>
+  <p id="cmdnote" style="font-size:13px;min-height:18px"></p>
   <hr>
   <p><span class="btn" id="benroll" style="display:block">Enrollment Mode</span></p>
   <p style="font-size:12px;color:#4a5468" id="tagnote"></p>
@@ -147,7 +158,7 @@ var ALL=[]; for(var i=0;i<GROUPS.length;i++){ for(var j=0;j<GROUPS[i][1].length;
 var CLASSOF={}; GROUPS.forEach(function(g){ g[1].forEach(function(m){ CLASSOF[m[0]]=g[0]; }); });
 
 var KEY='duke_nfc_v1';
-var DB={ session:null, checked:[], tags:{}, outbox:[] };
+var DB={ session:null, checked:[], tags:{}, outbox:[], rev:0 };
 var scanning=false, reader=null, pendingUID=null, syncing=false;
 
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -157,12 +168,12 @@ function pretty(iso){ if(!iso) return ''; var p=String(iso).split('-'); return p
 function norm(u){ return String(u||'').toUpperCase().replace(/[^0-9A-F]/g,''); }
 
 function load(){ try{ var r=localStorage.getItem(KEY); if(r){ DB=JSON.parse(r); } }catch(e){}
-  if(!DB.checked) DB.checked=[]; if(!DB.tags) DB.tags={}; if(!DB.outbox) DB.outbox=[]; }
+  if(!DB.checked) DB.checked=[]; if(!DB.tags) DB.tags={}; if(!DB.outbox) DB.outbox=[]; if(!DB.rev) DB.rev=0; }
 function save(){ try{ localStorage.setItem(KEY, JSON.stringify(DB)); }catch(e){} }
 
 /* ---------- display ---------- */
 function head(){
-  document.getElementById('stitle').innerHTML = DB.session ? esc(DB.session.title) : 'No session';
+  document.getElementById('stitle').innerHTML = DB.session ? esc(DB.session.title) : 'No conference running';
   document.getElementById('ssub').innerHTML = DB.session
     ? esc(pretty(DB.session.date) + (DB.session.presenter ? '  \u00b7  '+DB.session.presenter : ''))
     : 'Open Menu to start one';
@@ -270,8 +281,10 @@ function jsonp(what, cb){
     if(s.parentNode) s.parentNode.removeChild(s); }
   s.onerror=function(){ if(!done){ cleanup(); cb(null); } };
   setTimeout(function(){ if(!done){ cleanup(); cb(null); } }, 12000);
-  s.src = POST_URL + (POST_URL.indexOf('?')>-1?'&':'?') + 'what='+encodeURIComponent(what)
-        + '&callback='+name + '&t='+Date.now();
+  var parts=String(what).split('&');
+  var src = POST_URL + (POST_URL.indexOf('?')>-1?'&':'?') + 'what='+encodeURIComponent(parts.shift());
+  if(parts.length){ src += '&'+parts.join('&'); }
+  s.src = src + '&callback='+name + '&t='+Date.now();
   document.body.appendChild(s);
 }
 
@@ -279,14 +292,36 @@ function pull(showMsg){
   jsonp('state', function(d){
     if(!d || !d.ok){ if(showMsg) alert('Could not reach the sheet. Working offline.'); syncStat(); return; }
     if(d.tags){ DB.tags=d.tags; }
-    if(d.session){
-      if(!DB.session || DB.session.id!==d.session.id){
-        DB.session=d.session; DB.checked=[];   /* new session from another device */
-      } else { DB.session=d.session; }
+    var srev=(typeof d.rev==='number')?d.rev:0;
+    /* Only take state newer than ours, so a slow reply cannot undo a change
+       that was just made on this phone. */
+    if(srev > (DB.rev||0)){
+      DB.rev=srev;
+      if(!d.session){ DB.session=null; DB.checked=[]; }
+      else if(!DB.session || DB.session.id!==d.session.id){ DB.session=d.session; DB.checked=[]; }
+      else { DB.session=d.session; }
     }
     save(); head(); syncStat();
     if(showMsg) alert('Updated.\n\n'+Object.keys(DB.tags).length+' enrolled sticker(s).'+
-      (DB.session?('\n\nSession: '+DB.session.title+' '+pretty(DB.session.date)):'\n\nNo active session.'));
+      (DB.session?('\n\nConference: '+DB.session.title+' '+pretty(DB.session.date)):'\n\nNo conference running.'));
+  });
+}
+
+/* Confirmed session control over JSONP. */
+function sessionCmd(what, fields, done){
+  if(!POST_URL){ done(false,'No endpoint'); return; }
+  var q='';
+  for(var k in fields){ if(fields[k]!==undefined && fields[k]!==null){
+    q += '&'+k+'='+encodeURIComponent(fields[k]); } }
+  jsonp(what+q, function(d){
+    if(!d || !d.ok){ done(false, (d&&d.error)||'no answer'); return; }
+    DB.rev=(typeof d.rev==='number')?d.rev:(DB.rev||0);
+    if(d.session){
+      if(!DB.session || DB.session.id!==d.session.id){ DB.checked=[]; }
+      DB.session=d.session;
+    } else { DB.session=null; DB.checked=[]; }
+    save(); head(); syncStat();
+    done(true, d.session);
   });
 }
 
@@ -357,29 +392,83 @@ document.getElementById('bscan').onclick=function(){ if(scanning) stopScan(); el
 
 document.getElementById('bmenu').onclick=function(){
   if(prompt('Enter PIN')!==PIN) return;
-  document.getElementById('fttl').value = DB.session?DB.session.title:'Noon Conference';
-  document.getElementById('fdate').value = DB.session?DB.session.date:today();
-  document.getElementById('fpres').value = DB.session?DB.session.presenter:'';
-  document.getElementById('sessnote').innerHTML = DB.session
-    ? ('Active: '+esc(DB.session.title)+' '+pretty(DB.session.date))
-    : 'No active session yet.';
+  document.getElementById('fttl').value  = DB.session?DB.session.title:'Noon Conference';
+  document.getElementById('fdate').value = today();   /* always today, never a stale date */
+  document.getElementById('fpres').value = '';
+  document.getElementById('cmdnote').innerHTML='';
+  paintNow(); paintQuick();
   document.getElementById('tagnote').innerHTML = Object.keys(DB.tags).length+' sticker(s) enrolled.';
   document.getElementById('pmenu').style.display='block';
 };
+
+function paintNow(){
+  var el=document.getElementById('nowbox');
+  if(!DB.session){
+    el.style.background='#f2f4f7'; el.style.border='2px solid #c8cfda';
+    el.innerHTML='<b style="font-size:15px;color:#4a5468">No conference running</b>'+
+      '<div style="font-size:12px;color:#4a5468;margin-top:3px">Badge taps are not being recorded.</div>';
+    return;
+  }
+  var stale=(DB.session.date!==today());
+  el.style.background = stale?'#fdecea':'#e8f5ec';
+  el.style.border='2px solid '+(stale?'#b3261e':'#0b7a3b');
+  el.innerHTML='<div style="font-size:10px;letter-spacing:.06em;color:'+(stale?'#8a1c13':'#0b5c2e')+'">RUNNING NOW</div>'+
+    '<b style="font-size:16px">'+esc(DB.session.title)+'</b>'+
+    '<div style="font-size:13px;margin-top:2px">'+esc(pretty(DB.session.date))+
+    '  \u00b7  '+DB.checked.length+' checked in</div>'+
+    (stale?'<div style="font-size:12px;color:#8a1c13;margin-top:5px"><b>Dated '+esc(pretty(DB.session.date))+
+      ', not today.</b> Start a new one, or Rename to fix.</div>':'');
+}
+
+var COMMON=['Noon Conference','Morning Report','Grand Rounds','Board Review','Journal Club','Intern Report'];
+function paintQuick(){
+  var h='',i;
+  for(i=0;i<COMMON.length;i++){
+    h+='<span class="btn g qp" data-t="'+esc(COMMON[i])+'" style="padding:7px 9px;font-size:12px;margin:0 5px 5px 0;flex:0 0 auto;display:inline-block">'+esc(COMMON[i])+'</span>';
+  }
+  var el=document.getElementById('quickpick'); el.innerHTML=h;
+  var b=el.getElementsByClassName('qp');
+  for(i=0;i<b.length;i++){ b[i].onclick=(function(x){return function(){
+    document.getElementById('fttl').value=x.getAttribute('data-t'); };})(b[i]); }
+}
+function note(m,good){
+  document.getElementById('cmdnote').innerHTML='<span style="color:'+(good?'#0b7a3b':'#b3261e')+'">'+esc(m)+'</span>';
+}
+document.getElementById('btoday').onclick=function(){ document.getElementById('fdate').value=today(); };
+
+document.getElementById('bstart').onclick=function(){
+  var t=document.getElementById('fttl').value||'Conference';
+  var d=document.getElementById('fdate').value||today();
+  var p=document.getElementById('fpres').value||'';
+  if(!confirm('Start "'+t+'" for '+pretty(d)+'?')) return;
+  note('Starting...',true);
+  sessionCmd('start',{title:t,date:d,presenter:p},function(ok,res){
+    if(ok){ note('Started: '+res.title+' \u2014 '+pretty(res.date),true); paintNow(); }
+    else  { note('Could not reach the sheet. Nothing was started.',false); }
+  });
+};
+document.getElementById('brename').onclick=function(){
+  if(!DB.session){ note('Nothing is running. Use Start.',false); return; }
+  var t=document.getElementById('fttl').value||'Conference';
+  var d=document.getElementById('fdate').value||today();
+  var p=document.getElementById('fpres').value||'';
+  note('Saving...',true);
+  sessionCmd('update',{title:t,date:d,presenter:p},function(ok,res){
+    if(ok){ note('Updated: '+res.title+' \u2014 '+pretty(res.date),true); paintNow(); }
+    else  { note('Could not reach the sheet. Nothing changed.',false); }
+  });
+};
+document.getElementById('bend').onclick=function(){
+  if(!DB.session){ note('Nothing is running.',false); return; }
+  if(!confirm('End "'+DB.session.title+'"? Attendance is already saved.')) return;
+  note('Ending...',true);
+  sessionCmd('end',{},function(ok){
+    if(ok){ note('Ended. Nothing is being recorded now.',true); paintNow(); }
+    else  { note('Could not reach the sheet. Still running.',false); }
+  });
+};
 document.getElementById('bmenux').onclick=function(){ document.getElementById('pmenu').style.display='none'; };
 
-document.getElementById('bnew').onclick=function(){
-  var s={ id:'s'+Date.now(),
-          date:document.getElementById('fdate').value||today(),
-          title:document.getElementById('fttl').value||'Conference',
-          presenter:document.getElementById('fpres').value||'' };
-  if(!confirm('Start "'+s.title+'" for '+pretty(s.date)+'?\n\nThis also moves the iPad to this session.')) return;
-  DB.session=s; DB.checked=[]; save(); head(); syncStat();
-  push({ token:TOKEN, action:'newsession', session:s }, function(ok){
-    alert(ok ? 'Session started.' : 'Started on this phone. It will reach the sheet when the network returns.');
-  });
-  document.getElementById('pmenu').style.display='none';
-};
 
 document.getElementById('benroll').onclick=function(){
   document.getElementById('pmenu').style.display='none';

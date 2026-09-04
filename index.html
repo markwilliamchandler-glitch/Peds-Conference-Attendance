@@ -126,19 +126,31 @@ var PIN      = "2027";
 
 <!-- ADMIN -->
 <div class="panel" id="padm">
-  <h1>Menu</h1>
-  <div class="lbl">SESSION TITLE</div>
-  <input class="fld" id="fttl" type="text">
+  <h1>Conference</h1>
+
+  <div id="nowbox" style="padding:12px;border-radius:10px;margin-bottom:14px"></div>
+
+  <div class="lbl">CONFERENCE NAME</div>
+  <div id="quickpick" style="margin-bottom:7px"></div>
+  <input class="fld" id="fttl" type="text" placeholder="Noon Conference">
+
   <div class="lbl">DATE</div>
-  <input class="fld" id="fdate" type="date">
+  <div style="display:flex;gap:7px;align-items:center;margin-bottom:8px">
+    <input class="fld" id="fdate" type="date" style="margin-bottom:0;flex:1">
+    <span class="btn" id="btoday" style="margin:0">Today</span>
+  </div>
+
   <div class="lbl">PRESENTER (optional)</div>
   <input class="fld" id="fpres" type="text">
-  <p><span class="btn" id="bsave">Save Session Info</span></p>
+
+  <p><span class="btn" id="bstart" style="display:block;padding:15px;font-size:17px">Start This Conference</span></p>
+  <p><span class="btn gry" id="brename" style="display:block">Rename / Fix Date of Running Conference</span></p>
+  <p><span class="btn warn" id="bend" style="display:block">End Conference</span></p>
+  <p id="cmdnote" style="font-size:13px;min-height:20px"></p>
   <hr>
-  <p><span class="btn" id="bnew">Start a New Session</span>
-     <span class="btn" id="bsum">Attendance Summary</span></p>
-  <p><span class="btn" id="ball">Export ALL Sessions (CSV)</span>
-     <span class="btn" id="bsync">Sync Now</span></p>
+  <p><span class="btn" id="bsum">Attendance Summary</span>
+     <span class="btn" id="ball">Export ALL Sessions</span></p>
+  <p><span class="btn gry" id="bsync">Sync Now</span></p>
   <p id="syncinfo" style="font-size:12px;color:#4a5468"></p>
   <hr>
   <p><span class="btn warn" id="bclr">Erase All Stored Data</span></p>
@@ -170,7 +182,7 @@ var PHOTOS = {"Laura Izzo": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/
 
 /* ============ STATE ============ */
 var KEY = "duke_conf_attend_v1";
-var DB = { sessions: [], active: null, outbox: [] };
+var DB = { sessions: [], active: null, outbox: [], rev: 0 };
 var lastTap = null;
 var hideDone = true;
 
@@ -185,7 +197,8 @@ function load(){
   try { var raw = window.localStorage.getItem(KEY); if(raw){ DB = JSON.parse(raw); } } catch(e){}
   if(!DB.sessions){ DB.sessions=[]; }
   if(!DB.outbox){ DB.outbox=[]; }
-  if(!DB.active || !getS()){ newSession(true); }
+  if(!DB.rev){ DB.rev=0; }
+  /* No phantom sessions. Nothing records until a conference is started. */
 }
 function save(){ try { window.localStorage.setItem(KEY, JSON.stringify(DB)); } catch(e){} }
 function getS(){ var i; for(i=0;i<DB.sessions.length;i++){ if(DB.sessions[i].id===DB.active){ return DB.sessions[i]; } } return null; }
@@ -194,10 +207,18 @@ function newSession(quiet){
   DB.sessions.push(s); DB.active = s.id; save();
   if(!quiet){ lastTap=null; render(); }
 }
-function isCk(n){ var s=getS(); return s.checked.indexOf(n) > -1; }
+function isCk(n){ var s=getS(); return !!s && s.checked.indexOf(n) > -1; }
 
 function toggle(n){
-  var s=getS(), i=s.checked.indexOf(n);
+  var s=getS();
+  if(!s){
+    var f=document.getElementById("flash");
+    document.getElementById("flashtxt").innerHTML="No conference running \u2014 open Menu to start one";
+    f.style.background="#b3261e"; f.style.display="block";
+    return;
+  }
+  document.getElementById("flash").style.background="#0b7a3b";
+  var i=s.checked.indexOf(n);
   if(i>-1){ s.checked.splice(i,1); lastTap=null; flashOff(); post(n,s,"out"); }
   else { s.checked.push(n); lastTap=n; flashOn(n); post(n,s,"in"); }
   save(); paint();
@@ -206,6 +227,7 @@ function toggle(n){
 function post(n,s,act){
   if(!POST_URL){ return; }
   if(!DB.outbox){ DB.outbox=[]; }
+  if(!DB.rev){ DB.rev=0; }
   DB.outbox.push({ ts:(new Date()).toISOString(), sid:s.id, date:s.date, title:s.title,
                    presenter:s.presenter, resident:n, action:act, device:'ipad' });
   save(); flush();
@@ -226,14 +248,25 @@ function jsonp(what, cb){
     if(s.parentNode) s.parentNode.removeChild(s); }
   s.onerror=function(){ if(!done){ cleanup(); cb(null); } };
   setTimeout(function(){ if(!done){ cleanup(); cb(null); } }, 12000);
-  s.src=POST_URL+(POST_URL.indexOf('?')>-1?'&':'?')+'what='+encodeURIComponent(what)
-       +'&callback='+name+'&t='+Date.now();
+  var parts=String(what).split('&');
+  var src=POST_URL+(POST_URL.indexOf('?')>-1?'&':'?')+'what='+encodeURIComponent(parts.shift());
+  if(parts.length){ src += '&'+parts.join('&'); }
+  s.src = src+'&callback='+name+'&t='+Date.now();
   document.body.appendChild(s);
 }
 
 function pullSession(){
   jsonp('state', function(d){
-    if(!d || !d.ok || !d.session){ return; }
+    if(!d || !d.ok){ return; }
+    var srev = (typeof d.rev==='number') ? d.rev : 0;
+    /* Only adopt state that is NEWER than ours. A slow reply can no longer
+       overwrite a title or date that was just typed on this device. */
+    if(srev <= (DB.rev||0)){ return; }
+    DB.rev = srev;
+
+    if(!d.session){                      /* conference was ended elsewhere */
+      DB.active=null; save(); render(); head(); return;
+    }
     var s=d.session, cur=getS();
     if(cur && cur.id===s.id){
       cur.title=s.title; cur.date=s.date; cur.presenter=s.presenter;
@@ -246,6 +279,34 @@ function pullSession(){
       DB.sessions.push(found);
     }
     DB.active=found.id; lastTap=null; save(); render(); flashOff();
+  });
+}
+
+/* Confirmed session control. Uses JSONP so we can actually read the answer. */
+function sessionCmd(what, fields, done){
+  if(!POST_URL){ done(false,'No endpoint configured'); return; }
+  var q='';
+  for(var k in fields){ if(fields[k]!==undefined && fields[k]!==null){
+    q += '&'+k+'='+encodeURIComponent(fields[k]); } }
+  jsonp(what+q, function(d){
+    if(!d || !d.ok){ done(false, (d&&d.error)||'No answer from the sheet'); return; }
+    DB.rev = (typeof d.rev==='number') ? d.rev : (DB.rev||0);
+    if(d.session){
+      var found=null,i;
+      for(i=0;i<DB.sessions.length;i++){ if(DB.sessions[i].id===d.session.id){ found=DB.sessions[i]; break; } }
+      if(!found){
+        found={ id:d.session.id, date:d.session.date, title:d.session.title,
+                presenter:d.session.presenter, checked:[] };
+        DB.sessions.push(found);
+      } else {
+        found.title=d.session.title; found.date=d.session.date; found.presenter=d.session.presenter;
+      }
+      DB.active=found.id; lastTap=null;
+    } else {
+      DB.active=null;
+    }
+    save(); render(); head(); flashOff();
+    done(true, d.session);
   });
 }
 
@@ -317,12 +378,19 @@ function render(){
 
 function head(){
   var s=getS();
+  if(!s){
+    document.getElementById("stitle").innerHTML = "No conference running";
+    document.getElementById("ssub").innerHTML   = "Open Menu to start one";
+    document.getElementById("nck").innerHTML    = "0";
+    return;
+  }
   document.getElementById("stitle").innerHTML = esc(s.title || "Conference");
   document.getElementById("ssub").innerHTML = esc(pretty(s.date) + (s.presenter ? "  \u00b7  " + s.presenter : ""));
 }
 
 function paint(){
   var s=getS(), q=document.getElementById("q").value.toLowerCase();
+  if(!s){ s={checked:[]}; }
   var tiles=document.getElementsByClassName("tile"), i, n, ck, show;
   var counts={}, gi, shown={};
   for(i=0;i<tiles.length;i++){
@@ -448,45 +516,104 @@ document.getElementById("bundo").onclick = function(){ if(lastTap){ toggle(lastT
 document.getElementById("badm").onclick = function(){
   if(!gate()){ return; }
   var s=getS();
-  document.getElementById("fttl").value = s.title;
-  document.getElementById("fdate").value = s.date;
-  document.getElementById("fpres").value = s.presenter;
+  /* Name prefills from the running conference, but the DATE always starts at
+     today. Yesterday's date carrying over was the main way this went wrong. */
+  document.getElementById("fttl").value  = s ? s.title : "Noon Conference";
+  document.getElementById("fdate").value = today();
+  document.getElementById("fpres").value = "";
+  document.getElementById("cmdnote").innerHTML = "";
+  paintNow(); paintQuick();
   document.getElementById("syncinfo").innerHTML = POST_URL
     ? ((DB.outbox||[]).length + " tap(s) waiting to sync.")
     : "Google Sheet sync is off (POST_URL is blank).";
   document.getElementById("padm").style.display="block";
 };
+
+/* Status box: what is running right now, and whether it looks stale. */
+function paintNow(){
+  var s=getS(), el=document.getElementById("nowbox");
+  if(!s){
+    el.style.background="#f2f4f7"; el.style.border="2px solid #c8cfda";
+    el.innerHTML='<b style="font-size:15px;color:#4a5468">No conference running</b>'
+      +'<div style="font-size:12px;color:#4a5468;margin-top:3px">Taps are not being recorded. '
+      +'Fill in the name and date below, then Start.</div>';
+    return;
+  }
+  var stale = (s.date !== today());
+  el.style.background = stale ? "#fdecea" : "#e8f5ec";
+  el.style.border = "2px solid " + (stale ? "#b3261e" : "#0b7a3b");
+  el.innerHTML = '<div style="font-size:11px;letter-spacing:.06em;color:'+(stale?"#8a1c13":"#0b5c2e")+'">RUNNING NOW</div>'
+    + '<b style="font-size:17px">'+esc(s.title)+'</b>'
+    + '<div style="font-size:13px;margin-top:2px">'+esc(pretty(s.date))
+    + (s.presenter?'  \u00b7  '+esc(s.presenter):'')
+    + '  \u00b7  '+s.checked.length+' checked in</div>'
+    + (stale ? '<div style="font-size:12px;color:#8a1c13;margin-top:5px"><b>This is dated '
+        + esc(pretty(s.date)) + ', not today.</b> Start a new one, or use Rename to fix the date.</div>' : '');
+}
+
+/* One-tap names, so nobody has to type the usual ones. */
+var COMMON = ["Noon Conference","Morning Report","Grand Rounds","Board Review",
+              "Journal Club","Intern Report"];
+function paintQuick(){
+  var h="", i;
+  for(i=0;i<COMMON.length;i++){
+    h += '<span class="btn gry qp" data-t="'+esc(COMMON[i])+'" '
+       + 'style="padding:7px 10px;font-size:13px;margin:0 5px 5px 0">'+esc(COMMON[i])+'</span>';
+  }
+  var el=document.getElementById("quickpick");
+  el.innerHTML=h;
+  var b=el.getElementsByClassName("qp");
+  for(i=0;i<b.length;i++){
+    b[i].onclick=(function(x){ return function(){
+      document.getElementById("fttl").value = x.getAttribute("data-t"); }; })(b[i]);
+  }
+}
+
+function note(msg, good){
+  document.getElementById("cmdnote").innerHTML =
+    '<span style="color:'+(good?'#0b7a3b':'#b3261e')+'">'+esc(msg)+'</span>';
+}
+
+document.getElementById("btoday").onclick = function(){
+  document.getElementById("fdate").value = today();
+};
+
+document.getElementById("bstart").onclick = function(){
+  var t=document.getElementById("fttl").value || "Conference";
+  var d=document.getElementById("fdate").value || today();
+  var p=document.getElementById("fpres").value || "";
+  if(!confirm('Start "'+t+'" for '+pretty(d)+'?\n\nAny conference now running will be closed.')){ return; }
+  note("Starting...", true);
+  sessionCmd('start', {title:t, date:d, presenter:p}, function(ok, res){
+    if(ok){ note('Started: '+res.title+' \u2014 '+pretty(res.date), true); paintNow(); }
+    else  { note('Could not reach the sheet. Nothing was started \u2014 check WiFi and try again.', false); }
+  });
+};
+
+document.getElementById("brename").onclick = function(){
+  if(!getS()){ note('Nothing is running. Use Start instead.', false); return; }
+  var t=document.getElementById("fttl").value || "Conference";
+  var d=document.getElementById("fdate").value || today();
+  var p=document.getElementById("fpres").value || "";
+  note("Saving...", true);
+  sessionCmd('update', {title:t, date:d, presenter:p}, function(ok, res){
+    if(ok){ note('Updated: '+res.title+' \u2014 '+pretty(res.date)+'. Everyone already checked in is kept.', true); paintNow(); }
+    else  { note('Could not reach the sheet. Nothing was changed.', false); }
+  });
+};
+
+document.getElementById("bend").onclick = function(){
+  var s=getS();
+  if(!s){ note('Nothing is running.', false); return; }
+  if(!confirm('End "'+s.title+'"?\n\nAttendance is already saved. Taps will stop being recorded '
+              +'until you start another conference.')){ return; }
+  note("Ending...", true);
+  sessionCmd('end', {}, function(ok){
+    if(ok){ note('Ended. Nothing is being recorded now.', true); paintNow(); }
+    else  { note('Could not reach the sheet. It is still running.', false); }
+  });
+};
 document.getElementById("badmx").onclick = function(){ document.getElementById("padm").style.display="none"; };
-document.getElementById("bsave").onclick = function(){
-  var s=getS();
-  s.title = document.getElementById("fttl").value || "Conference";
-  s.date  = document.getElementById("fdate").value || today();
-  s.presenter = document.getElementById("fpres").value;
-  save(); head();
-  if(POST_URL){
-    try{
-      fetch(POST_URL,{method:'POST',mode:'no-cors',cache:'no-store',
-        headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body:JSON.stringify({token:TOKEN, action:'newsession',
-          session:{id:s.id,date:s.date,title:s.title,presenter:s.presenter}})});
-    }catch(e){}
-  }
-  document.getElementById("padm").style.display="none";
-};
-document.getElementById("bnew").onclick = function(){
-  if(!window.confirm("Start a new session? The current one stays saved on this iPad.")){ return; }
-  newSession(false);
-  var s=getS();
-  if(POST_URL){
-    try{
-      fetch(POST_URL,{method:'POST',mode:'no-cors',cache:'no-store',
-        headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body:JSON.stringify({token:TOKEN, action:'newsession',
-          session:{id:s.id,date:s.date,title:s.title,presenter:s.presenter}})});
-    }catch(e){}
-  }
-  document.getElementById("padm").style.display="none";
-};
 document.getElementById("bsum").onclick = function(){
   document.getElementById("padm").style.display="none"; showSummary();
 };
@@ -501,11 +628,12 @@ document.getElementById("ball").onclick = function(){
 document.getElementById("bclr").onclick = function(){
   if(!window.confirm("This erases EVERY stored session on this iPad. Export first. Continue?")){ return; }
   if(!gate()){ return; }
-  DB={sessions:[],active:null,outbox:[]}; save(); load(); render(); syncStat();
+  DB={sessions:[],active:null,outbox:[],rev:0}; save(); load(); render(); syncStat();
   document.getElementById("padm").style.display="none";
 };
 document.getElementById("bexp").onclick = function(){
   var s=getS();
+  if(!s){ alert("No conference is running. Start one first, or use Export ALL Sessions."); return; }
   showExport(s.title+" \u2014 "+pretty(s.date), sessionCSV(s),
     s.checked.length+" of "+ALL.length+" present.");
 };
